@@ -53,9 +53,10 @@ func logPipe(pipe io.ReadCloser, identifier string) error {
 // StartNode starts a geth daemon in another goroutine
 // and logs the results to the console.
 func StartNode(ctx context.Context, arguments string, g *errgroup.Group) error {
-	//parsedArgs := strings.Split(arguments, " ")
+	parsedArgs := strings.Split(arguments, " ")
 	cmd := exec.Command(
-		"/app/erigon", "datadir /data", "chain goerli",
+		"/app/erigon",
+		parsedArgs...,
 		) // #nosec G204
 
 	stdout, err := cmd.StdoutPipe()
