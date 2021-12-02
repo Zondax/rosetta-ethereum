@@ -99,6 +99,7 @@ type Configuration struct {
 	RemoteGeth             bool
 	Port                   int
 	GethArguments          string
+	RPCArguments           string
 	SkipGethAdmin          bool
 
 	// Block Reward Data
@@ -132,6 +133,7 @@ func LoadConfiguration() (*Configuration, error) {
 		config.GenesisBlockIdentifier = ethereum.MainnetGenesisBlockIdentifier
 		config.Params = params.MainnetChainConfig
 		config.GethArguments = ethereum.MainnetGethArguments
+		config.RPCArguments = ethereum.MainnetRPCDaemonArguments
 	case Testnet, Ropsten:
 		config.Network = &types.NetworkIdentifier{
 			Blockchain: ethereum.Blockchain,

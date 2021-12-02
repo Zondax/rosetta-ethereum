@@ -122,6 +122,10 @@ const (
 	// MainnetGethArguments are the arguments to start a mainnet geth instance.
 	MainnetGethArguments = `--datadir /data --chain goerli`
 
+	// MainnetRPCDaemonArguments
+	MainnetRPCDaemonArguments = `--datadir /data" --private.api.addr=localhost:9090
+		--http.api=eth,erigon,web3,net,debug,trace,txpool`
+
 	// IncludeMempoolCoins does not apply to rosetta-ethereum as it is not UTXO-based.
 	IncludeMempoolCoins = false
 )

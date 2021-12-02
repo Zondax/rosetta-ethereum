@@ -94,7 +94,7 @@ func runRunCmd(cmd *cobra.Command, args []string) error {
 
 		g.Go(func() error {
 			log.Printf("Starting RPC daemon....")
-			return ethereum.StartRPCDaemon(ctx, cfg.GethArguments, g)
+			return ethereum.StartRPCDaemon(ctx, cfg.RPCArguments, g)
 		})
 
 		var err error
