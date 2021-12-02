@@ -22,12 +22,10 @@ WORKDIR /app
 
 # Compile Erigon
 # VERSION: go-ethereum v.1.10.8
-RUN git clone --recurse-submodules -j8 https://github.com/ledgerwatch/erigon.git \
-  && cd erigon \
+RUN git clone --recurse-submodules -j8 https://github.com/ledgerwatch/erigon.git ./erigon-node \
+  && cd erigon-node \
   && git checkout ${ERIGON_TAG} \
   && make erigon
-
-RUN mv erigon/build/bin/erigon /app/erigon
 
 # Compile rosetta-ethereum
 # Use native remote build context to build in any directory
@@ -54,7 +52,7 @@ RUN mkdir -p /app \
 WORKDIR /app
 
 # Copy binary from geth-builder
-COPY --from=golang-builder /app/erigon /app/erigon
+COPY --from=golang-builder /app/erigon-node/build/bin/erigon /app/erigon
 
 # Copy binary from rosetta-builder
 COPY --from=golang-builder /app/ethereum /app/ethereum
