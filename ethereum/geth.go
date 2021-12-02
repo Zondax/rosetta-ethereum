@@ -28,8 +28,10 @@ import (
 )
 
 const (
-	gethLogger       = "geth"
-	gethStdErrLogger = "geth err"
+	ethLogger       = "erigon"
+	ethStdErrLogger = "erigon err"
+	rpcLogger       = "rpcDaemon"
+	rpcStdErrLogger = "rpcDaemon err"
 )
 
 // logPipe prints out logs from geth. We don't end when context
@@ -48,9 +50,9 @@ func logPipe(pipe io.ReadCloser, identifier string) error {
 	}
 }
 
-// StartGeth starts a geth daemon in another goroutine
+// StartNode starts a geth daemon in another goroutine
 // and logs the results to the console.
-func StartGeth(ctx context.Context, arguments string, g *errgroup.Group) error {
+func StartNode(ctx context.Context, arguments string, g *errgroup.Group) error {
 	//parsedArgs := strings.Split(arguments, " ")
 	cmd := exec.Command(
 		"/app/erigon", "datadir /data", "chain goerli",
@@ -67,15 +69,56 @@ func StartGeth(ctx context.Context, arguments string, g *errgroup.Group) error {
 	}
 
 	g.Go(func() error {
-		return logPipe(stdout, gethLogger)
+		return logPipe(stdout, ethLogger)
 	})
 
 	g.Go(func() error {
-		return logPipe(stderr, gethStdErrLogger)
+		return logPipe(stderr, ethStdErrLogger)
 	})
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%w: unable to start geth", err)
+	}
+
+	g.Go(func() error {
+		<-ctx.Done()
+
+		log.Println("sending interrupt to erigon")
+		return cmd.Process.Signal(os.Interrupt)
+	})
+
+	return cmd.Wait()
+}
+
+// StartRPCDaemon starts an Erigon rpc daemon in another goroutine
+// and logs the results to the console.
+func StartRPCDaemon(ctx context.Context, arguments string, g *errgroup.Group) error {
+	//parsedArgs := strings.Split(arguments, " ")
+	cmd := exec.Command(
+		"/app/rpcdaemon", "datadir /data", "private.api.addr=localhost:9090",
+		"http.api=eth,erigon,web3,net,debug,trace,txpool",
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	g.Go(func() error {
+		return logPipe(stdout, rpcLogger)
+	})
+
+	g.Go(func() error {
+		return logPipe(stderr, rpcStdErrLogger)
+	})
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%w: unable to start rpc daemon", err)
 	}
 
 	g.Go(func() error {

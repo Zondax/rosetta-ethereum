@@ -87,9 +87,15 @@ func runRunCmd(cmd *cobra.Command, args []string) error {
 	if cfg.Mode == configuration.Online {
 		if !cfg.RemoteGeth {
 			g.Go(func() error {
-				return ethereum.StartGeth(ctx, cfg.GethArguments, g)
+				log.Printf("Starting Erigon node....")
+				return ethereum.StartNode(ctx, cfg.GethArguments, g)
 			})
 		}
+
+		g.Go(func() error {
+			log.Printf("Starting RPC daemon....")
+			return ethereum.StartRPCDaemon(ctx, cfg.GethArguments, g)
+		})
 
 		var err error
 		client, err = ethereum.NewClient(cfg.GethURL, cfg.Params, cfg.SkipGethAdmin)

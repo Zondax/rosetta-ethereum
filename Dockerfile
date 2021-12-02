@@ -25,7 +25,8 @@ WORKDIR /app
 RUN git clone --recurse-submodules -j8 https://github.com/ledgerwatch/erigon.git ./erigon-node \
   && cd erigon-node \
   && git checkout ${ERIGON_TAG} \
-  && make erigon
+  && make erigon \
+  && make rpcdaemon
 
 # Compile rosetta-ethereum
 # Use native remote build context to build in any directory
@@ -42,6 +43,8 @@ RUN mv src/rosetta-ethereum /app/rosetta-ethereum \
 ## Build Final Image
 FROM ubuntu:20.04
 
+EXPOSE 8545 8546 30303 30303/udp 30304 30304/udp 8080 9090 6060
+
 RUN apt-get update && apt-get install -y ca-certificates && update-ca-certificates
 
 RUN mkdir -p /app \
@@ -53,6 +56,7 @@ WORKDIR /app
 
 # Copy binary from geth-builder
 COPY --from=golang-builder /app/erigon-node/build/bin/erigon /app/erigon
+COPY --from=golang-builder /app/erigon-node/build/bin/rpcdaemon /app/rpcdaemon
 
 # Copy binary from rosetta-builder
 COPY --from=golang-builder /app/ethereum /app/ethereum
