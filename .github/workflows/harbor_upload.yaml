@@ -2,7 +2,7 @@ name: "Push image to private harbor registry"
 on:
   push:
     branches:
-      - main
+      - master
 
 env:
   PROJECT: rosetta-ethereum
