@@ -8,8 +8,8 @@ HTTPHost = "0.0.0.0"
 HTTPPort = 8545
 HTTPVirtualHosts = ["*"]
 GraphQLVirtualHosts = ["*"]
-HTTPModules = ["eth", "debug", "admin"] 
-IPCPath = ""
+HTTPModules = ["eth", "debug", "admin", "txpool", "web3"]
+IPCPath = "~/.ethereum/geth.ipc"
 
 [Node.HTTPTimeouts]
 ReadTimeout = 120000000000
