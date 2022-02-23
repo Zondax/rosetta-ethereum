@@ -25,7 +25,7 @@ import (
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
 )
 
-// Client is used by the servicers to get block
+// Client is used by the services to get block
 // data and to submit transactions.
 type Client interface {
 	Status(context.Context) (
@@ -41,6 +41,12 @@ type Client interface {
 		*types.PartialBlockIdentifier,
 	) (*types.Block, error)
 
+	Transaction(
+		context.Context,
+		*types.BlockIdentifier,
+		*types.TransactionIdentifier,
+	) (*types.Transaction, error)
+
 	Balance(
 		context.Context,
 		*types.AccountIdentifier,
@@ -52,6 +58,8 @@ type Client interface {
 	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 
 	SendTransaction(ctx context.Context, tx *ethTypes.Transaction) error
+
+	GetMempool(ctx context.Context) (*types.MempoolResponse, error)
 
 	Call(
 		ctx context.Context,

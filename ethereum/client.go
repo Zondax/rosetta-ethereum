@@ -45,10 +45,14 @@ const (
 
 	maxTraceConcurrency  = int64(16) // nolint:gomnd
 	semaphoreTraceWeight = int64(1)  // nolint:gomnd
+
+	// eip1559TxType is the EthTypes.Transaction.Type() value that indicates this transaction
+	// follows EIP-1559.
+	eip1559TxType = 2
 )
 
 // Client allows for querying a set of specific Ethereum endpoints in an
-// idempotent manner. Client relies on the eth_*, debug_*, and admin_*
+// idempotent manner. Client relies on the eth_*, debug_*, admin_*, and txpool_*
 // methods and on the graphql endpoint.
 //
 // Client borrows HEAVILY from https://github.com/ethereum/go-ethereum/tree/master/ethclient.
@@ -100,7 +104,7 @@ func (ec *Client) Status(ctx context.Context) (
 	[]*RosettaTypes.Peer,
 	error,
 ) {
-	header, err := ec.blockHeader(ctx, nil)
+	header, err := ec.blockHeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, -1, nil, nil, err
 	}
@@ -206,6 +210,90 @@ func toBlockNumArg(number *big.Int) string {
 	return hexutil.EncodeBig(number)
 }
 
+// Transaction returns the transaction response of the Transaction identified
+// by *RosettaTypes.TransactionIdentifier hash
+func (ec *Client) Transaction(
+	ctx context.Context,
+	blockIdentifier *RosettaTypes.BlockIdentifier,
+	transactionIdentifier *RosettaTypes.TransactionIdentifier,
+) (*RosettaTypes.Transaction, error) {
+	if transactionIdentifier.Hash == "" {
+		return nil, errors.New("transaction hash is required")
+	}
+
+	var raw json.RawMessage
+	err := ec.c.CallContext(ctx, &raw, "eth_getTransactionByHash", transactionIdentifier.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: transaction fetch failed", err)
+	} else if len(raw) == 0 {
+		return nil, ethereum.NotFound
+	}
+
+	// Decode transaction
+	var body rpcTransaction
+
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+
+	var header *types.Header
+	if blockIdentifier.Hash != "" {
+		header, err = ec.blockHeaderByHash(ctx, blockIdentifier.Hash)
+	} else {
+		header, err = ec.blockHeaderByNumber(ctx, big.NewInt(blockIdentifier.Index))
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: could not get block header for %x", err, blockIdentifier.Hash)
+	}
+
+	receipt, err := ec.transactionReceipt(ctx, body.tx.Hash())
+	if receipt.BlockHash != *body.BlockHash {
+		return nil, fmt.Errorf(
+			"%w: expected block hash %s for transaction but got %s",
+			ErrBlockOrphaned,
+			body.BlockHash.Hex(),
+			receipt.BlockHash.Hex(),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: could not get receipt for %x", err, body.tx.Hash())
+	}
+
+	var traces *Call
+	var rawTraces json.RawMessage
+	var addTraces bool
+	if header.Number.Int64() != GenesisBlockIndex { // not possible to get traces at genesis
+		addTraces = true
+		traces, rawTraces, err = ec.getTransactionTraces(ctx, body.tx.Hash())
+		if err != nil {
+			return nil, fmt.Errorf("%w: could not get traces for %x", err, body.tx.Hash())
+		}
+	}
+
+	loadedTx := body.LoadedTransaction()
+	loadedTx.Transaction = body.tx
+	feeAmount, feeBurned, err := calculateGas(body.tx, receipt, *header)
+	if err != nil {
+		return nil, err
+	}
+	loadedTx.FeeAmount = feeAmount
+	loadedTx.FeeBurned = feeBurned
+	loadedTx.Miner = MustChecksum(header.Coinbase.Hex())
+	loadedTx.Receipt = receipt
+
+	if addTraces {
+		loadedTx.Trace = traces
+		loadedTx.RawTrace = rawTraces
+	}
+
+	tx, err := ec.populateTransaction(loadedTx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot parse %s", err, loadedTx.Transaction.Hash().Hex())
+	}
+	return tx, nil
+}
+
 // Block returns a populated block at the *RosettaTypes.PartialBlockIdentifier.
 // If neither the hash or index is populated in the *RosettaTypes.PartialBlockIdentifier,
 // the current block is returned.
@@ -233,9 +321,24 @@ func (ec *Client) Block(
 
 // Header returns a block header from the current canonical chain. If number is
 // nil, the latest known header is returned.
-func (ec *Client) blockHeader(ctx context.Context, number *big.Int) (*types.Header, error) {
+func (ec *Client) blockHeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
 	var head *types.Header
 	err := ec.c.CallContext(ctx, &head, "eth_getBlockByNumber", toBlockNumArg(number), false)
+	if err == nil && head == nil {
+		return nil, ethereum.NotFound
+	}
+
+	return head, err
+}
+
+// Header returns a block header from the current canonical chain. If hash is empty
+// it returns error.
+func (ec *Client) blockHeaderByHash(ctx context.Context, hash string) (*types.Header, error) {
+	var head *types.Header
+	if hash == "" {
+		return nil, errors.New("hash is empty")
+	}
+	err := ec.c.CallContext(ctx, &head, "eth_getBlockByHash", hash, false)
 	if err == nil && head == nil {
 		return nil, ethereum.NotFound
 	}
@@ -367,12 +470,18 @@ func (ec *Client) getBlock(
 	for i, tx := range body.Transactions {
 		txs[i] = tx.tx
 		receipt := receipts[i]
-		gasUsedBig := new(big.Int).SetUint64(receipt.GasUsed)
-		feeAmount := gasUsedBig.Mul(gasUsedBig, txs[i].GasPrice())
-
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: failure getting effective gas price", err)
+		}
 		loadedTxs[i] = tx.LoadedTransaction()
 		loadedTxs[i].Transaction = txs[i]
+
+		feeAmount, feeBurned, err := calculateGas(txs[i], receipt, head)
+		if err != nil {
+			return nil, nil, err
+		}
 		loadedTxs[i].FeeAmount = feeAmount
+		loadedTxs[i].FeeBurned = feeBurned
 		loadedTxs[i].Miner = MustChecksum(head.Coinbase.Hex())
 		loadedTxs[i].Receipt = receipt
 
@@ -386,6 +495,66 @@ func (ec *Client) getBlock(
 	}
 
 	return types.NewBlockWithHeader(&head).WithBody(txs, uncles), loadedTxs, nil
+}
+
+func calculateGas(
+	tx *types.Transaction,
+	txReceipt *types.Receipt,
+	head types.Header,
+) (
+	*big.Int, *big.Int, error,
+) {
+	gasUsed := new(big.Int).SetUint64(txReceipt.GasUsed)
+	gasPrice, err := effectiveGasPrice(tx, head.BaseFee)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: failure getting effective gas price", err)
+	}
+	feeAmount := new(big.Int).Mul(gasUsed, gasPrice)
+	var feeBurned *big.Int
+	if head.BaseFee != nil { // EIP-1559
+		feeBurned = new(big.Int).Mul(gasUsed, head.BaseFee)
+	}
+
+	return feeAmount, feeBurned, nil
+}
+
+// effectiveGasPrice returns the price of gas charged to this transaction to be included in the
+// block.
+func effectiveGasPrice(tx *EthTypes.Transaction, baseFee *big.Int) (*big.Int, error) {
+	if tx.Type() != eip1559TxType {
+		return tx.GasPrice(), nil
+	}
+	// For EIP-1559 the gas price is determined by the base fee & miner tip instead
+	// of the tx-specified gas price.
+	tip, err := tx.EffectiveGasTip(baseFee)
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).Add(tip, baseFee), nil
+}
+
+func (ec *Client) getTransactionTraces(
+	ctx context.Context,
+	transactionHash common.Hash,
+) (*Call, json.RawMessage, error) {
+	if err := ec.traceSemaphore.Acquire(ctx, semaphoreTraceWeight); err != nil {
+		return nil, nil, err
+	}
+	defer ec.traceSemaphore.Release(semaphoreTraceWeight)
+
+	var call *Call
+	var raw json.RawMessage
+	err := ec.c.CallContext(ctx, &raw, "debug_traceTransaction", transactionHash, ec.tc)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Decode *Call
+	if err := json.Unmarshal(raw, &call); err != nil {
+		return nil, nil, err
+	}
+
+	return call, raw, nil
 }
 
 func (ec *Client) getBlockTraces(
@@ -754,6 +923,7 @@ type loadedTransaction struct {
 	BlockNumber *string
 	BlockHash   *common.Hash
 	FeeAmount   *big.Int
+	FeeBurned   *big.Int // nil if no fees were burned
 	Miner       string
 	Status      bool
 
@@ -763,7 +933,13 @@ type loadedTransaction struct {
 }
 
 func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
-	return []*RosettaTypes.Operation{
+	var minerEarnedAmount *big.Int
+	if tx.FeeBurned == nil {
+		minerEarnedAmount = tx.FeeAmount
+	} else {
+		minerEarnedAmount = new(big.Int).Sub(tx.FeeAmount, tx.FeeBurned)
+	}
+	ops := []*RosettaTypes.Operation{
 		{
 			OperationIdentifier: &RosettaTypes.OperationIdentifier{
 				Index: 0,
@@ -774,7 +950,7 @@ func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
 				Address: MustChecksum(tx.From.String()),
 			},
 			Amount: &RosettaTypes.Amount{
-				Value:    new(big.Int).Neg(tx.FeeAmount).String(),
+				Value:    new(big.Int).Neg(minerEarnedAmount).String(),
 				Currency: Currency,
 			},
 		},
@@ -794,11 +970,29 @@ func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
 				Address: MustChecksum(tx.Miner),
 			},
 			Amount: &RosettaTypes.Amount{
-				Value:    tx.FeeAmount.String(),
+				Value:    minerEarnedAmount.String(),
 				Currency: Currency,
 			},
 		},
 	}
+	if tx.FeeBurned == nil {
+		return ops
+	}
+	burntOp := &RosettaTypes.Operation{
+		OperationIdentifier: &RosettaTypes.OperationIdentifier{
+			Index: 2, // nolint:gomnd
+		},
+		Type:   FeeOpType,
+		Status: RosettaTypes.String(SuccessStatus),
+		Account: &RosettaTypes.AccountIdentifier{
+			Address: MustChecksum(tx.From.String()),
+		},
+		Amount: &RosettaTypes.Amount{
+			Value:    new(big.Int).Neg(tx.FeeBurned).String(),
+			Currency: Currency,
+		},
+	}
+	return append(ops, burntOp)
 }
 
 // transactionReceipt returns the receipt of a transaction by transaction hash.
@@ -1018,7 +1212,7 @@ func (ec *Client) populateTransactions(
 func (ec *Client) populateTransaction(
 	tx *loadedTransaction,
 ) (*RosettaTypes.Transaction, error) {
-	ops := []*RosettaTypes.Operation{}
+	var ops []*RosettaTypes.Operation
 
 	// Compute fee operations
 	feeOps := feeOps(tx)
@@ -1067,14 +1261,10 @@ func (ec *Client) populateTransaction(
 // for a given block height.
 //
 // Source:
-// https://github.com/ethereum/go-ethereum/master/consensus/ethash/consensus.go#L619-L645
+// https://github.com/ethereum/go-ethereum/blob/master/consensus/ethash/consensus.go#L646-L653
 func (ec *Client) miningReward(
 	currentBlock *big.Int,
 ) int64 {
-	if currentBlock.Int64() == int64(0) {
-		return big.NewInt(0).Int64()
-	}
-
 	blockReward := ethash.FrontierBlockReward.Int64()
 	if ec.p.IsByzantium(currentBlock) {
 		blockReward = ethash.ByzantiumBlockReward.Int64()
@@ -1388,4 +1578,43 @@ func (ec *Client) Call(
 	}
 
 	return nil, fmt.Errorf("%w: %s", ErrCallMethodInvalid, request.Method)
+}
+
+// txPoolContentResponse represents the response for a call to
+// geth node on the "txpool_content" method.
+type txPoolContentResponse struct {
+	Pending txPool `json:"pending"`
+	Queued  txPool `json:"queued"`
+}
+
+type txPool map[string]txPoolInner
+
+type txPoolInner map[string]rpcTransaction
+
+// GetMempool get and returns all the transactions on Ethereum TxPool (pending and queued).
+func (ec *Client) GetMempool(ctx context.Context) (*RosettaTypes.MempoolResponse, error) {
+	var response txPoolContentResponse
+	if err := ec.c.CallContext(ctx, &response, "txpool_content"); err != nil {
+		return nil, err
+	}
+
+	identifiers := make([]*RosettaTypes.TransactionIdentifier, 0)
+
+	for _, inner := range response.Pending {
+		for _, info := range inner {
+			identifiers = append(identifiers, &RosettaTypes.TransactionIdentifier{
+				Hash: info.tx.Hash().String(),
+			})
+		}
+	}
+
+	for _, inner := range response.Queued {
+		for _, info := range inner {
+			identifiers = append(identifiers, &RosettaTypes.TransactionIdentifier{
+				Hash: info.tx.Hash().String(),
+			})
+		}
+	}
+
+	return &RosettaTypes.MempoolResponse{TransactionIdentifiers: identifiers}, nil
 }
